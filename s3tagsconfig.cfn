@@ -132,8 +132,8 @@ Resources:
               except:
                 print('ERROR: Unable to set bucket to private.  BucketName: ' + event['detail']['resourceId'])
                 bSuccess=False
-            result = s3client.get_bucket_acl(Bucket=event['detail']['resourceId'])
-            print('After: ', result, '\n')
+            result2 = s3client.get_bucket_acl(Bucket=event['detail']['resourceId'])
+            print('After: ', result2, '\n')
             print(bSuccess)
 
             return bSuccess
