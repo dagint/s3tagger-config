@@ -1,0 +1,220 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  S3PublicBucketNoTags:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: s3pubreadbucketnotags
+      AccessControl: PublicRead
+  S3PublicBucketWithTags:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: s3pubreadbucketwithtags
+      AccessControl: PublicRead
+      Tags:
+        -
+          Key: public
+          Value: true
+  S3BucketNoTags:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: s3bucketnotags
+  S3BucketWithTags:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: s3bucketwithtags
+      Tags:
+        -
+          Key: public
+          Value: false
+  AllowPutBucketTaggingPol:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: "AllowPutBucketTagging"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action:
+              - "s3:Get*"
+              - "s3:List*"
+              - "s3:PutBucketTagging"
+            Resource: "*"
+      Roles:
+        - Ref: "LambdaS3TaggerRole"
+  s3AllowPutBucketAcl:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: "s3PutBucketAcl"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action:
+              - "s3:GetBucketAcl"
+              - "s3:PutBucketAcl"
+            Resource: "*"
+      Roles:
+        - Ref: "LambdaS3PutBucketAclRole"
+  LambdaS3PutBucketAclRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: LambdaLogsAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+            Resource: arn:aws:logs:*:*:*
+  LambdaS3TaggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: LambdaLogsAccess
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - "logs:CreateLogGroup"
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+            Resource: arn:aws:logs:*:*:*
+  LambdaS3BucketPrivate:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt [LambdaS3PutBucketAclRole, Arn]
+      Runtime: "python2.7"
+      Timeout: "240"
+      Code:
+        ZipFile: |
+          import boto3
+
+          def lambda_handler(event, context):
+            s3client = boto3.client('s3')
+            print(event['detail']['resourceId'])
+            result = s3client.get_bucket_acl(Bucket=event['detail']['resourceId'])
+            print('Before: ', result, '\n')
+            if (event['detail']['newEvaluationResult']['complianceType']) == 'NON_COMPLIANT':
+              #print('NON_COMPLIANT')
+              try:
+                response = s3client.put_bucket_acl(
+                  ACL='private',
+                  Bucket=event['detail']['resourceId']
+                )
+                bSuccess=True
+              except:
+                print('ERROR: Unable to set bucket to private.  BucketName: ' + event['detail']['resourceId'])
+                bSuccess=False
+            result = s3client.get_bucket_acl(Bucket=event['detail']['resourceId'])
+            print('Before: ', result, '\n')
+            print(bSuccess)
+
+            return bSuccess
+  LambdaS3BucketTagger:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: "index.lambda_handler"
+      Role: !GetAtt [LambdaS3TaggerRole, Arn]
+      Runtime: "python2.7"
+      Timeout: "240"
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+
+          class DatetimeEncoder(json.JSONEncoder):
+            def default(self, obj):
+              try:
+                return super(DatetimeEncoder, obj).default(obj)
+              except TypeError:
+                return str(obj)
+
+
+          def lambda_handler(event, context):
+            s3resource = boto3.resource('s3')
+            s3client = boto3.client('s3')
+
+            for bucket in s3resource.buckets.all():
+              bpubtag = False
+              bcfntag = False
+              tagsets = ""
+              strbucket = bucket.name
+              #print(strbucket)
+              try:
+                tags = s3client.get_bucket_tagging(Bucket=strbucket)
+                #print(tags)
+                json_pre = json.dumps(tags, cls=DatetimeEncoder)
+                parsed_json = json.loads(json_pre)
+                if (parsed_json['ResponseMetadata']['HTTPStatusCode']) == 200:
+                  tagsets = parsed_json.get('TagSet')
+                  for tagset in tagsets:
+                    #print(tagset)
+                    if tagset['Key'] == 'public':
+                      #print(tagset)
+                      bpubtag = True
+                      break
+                    tmp = tagset['Key']
+                    tmp = tmp[:4]
+                    if tmp == 'aws:':
+                      bcfntag = True
+                  if bpubtag:
+                    print('bucket: '+ strbucket +' found public tag')
+                  else:
+                    if bcfntag:
+                      print('ERROR: Please update tags via cloudformation stack: '  +strbucket)
+                      #print(tagsets)
+                    else:
+                      newtagset = tagsets.append({'Key': 'public', 'Value': 'false'})
+                      #print(tagsets)
+                      try:
+                        addtags = s3client.put_bucket_tagging(Bucket=strbucket,Tagging={'TagSet': tagsets})
+                        print('Successfully added public tag to bucket: ' +strbucket)
+                      except:
+                        print('ERROR: unable to add public tag to bucket: ' +strbucket)
+              except:
+                try:
+                  addtags = s3client.put_bucket_tagging(Bucket=strbucket,Tagging={'TagSet': [{'Key':'public','Value':'false'},]})
+                  print('Successfully added public tag to bucket: ' +strbucket)
+                except:
+                  print('ERROR: unable to add public tag to bucket: ' +strbucket)
+            return 'Completed scanning s3 buckets for tags'
+Outputs:
+  S3PubReadBucketNoTags:
+    Value: !Ref S3PublicBucketNoTags
+    Description: Bucket for S3PublicBucketNoTags
+  S32PublicBucketWithTags:
+    Value: !Ref S3PublicBucketWithTags
+    Description: Bucket for S3PublicBucketWithTags
+  S3BucketNoTags:
+    Value: !Ref S3BucketNoTags
+    Description: Bucket for S3BucketNoTags
+  S3BucketWithTags:
+    Value: !Ref S3BucketWithTags
+    Description: Bucket for S3BucketWithTags
